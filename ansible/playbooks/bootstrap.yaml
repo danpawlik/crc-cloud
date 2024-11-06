@@ -1,0 +1,115 @@
+---
+- name: Prepare and create container to start crc-cloud playbook
+  hosts: crc-cloud.dev
+  tasks:
+    # FIXME: change to main repository
+    - name: Clone crc-cloud repository
+      ansible.builtin.git:
+        repo: https://github.com/danpawlik/crc-cloud
+        dest: crc-cloud
+        version: add-ansible-role
+
+    - name: Check if boostrap ssh key exists
+      ansible.builtin.stat:
+        path: .ssh/crc-cloud-bootstrap.pub
+      register: _boostrap_ssh_key
+
+    - name: Generate ssh keypair
+      when: not _boostrap_ssh_key.stat.exists
+      community.crypto.openssh_keypair:
+        path: .ssh/crc-cloud-bootstrap
+        type: ed25519
+        state: present
+        owner: core
+        group: core
+
+    - name: Add generated key to authorized keys
+      ansible.builtin.shell: |
+        cat .ssh/crc-cloud-bootstrap.pub >> .ssh/authorized_keys.d/ignition
+
+    # FIXME: move it to dedicated files
+    - name: Create entrypoint file
+      ansible.builtin.copy:
+        content: |
+          #!/bin/bash
+
+          echo "Check if inventory.yaml exists..."
+          if [ -f "inventory.yaml" ]; then
+              echo "Starting Ansible..."
+              export ANSIBLE_HOST_KEY_CHECKING=False
+              export ANSIBLE_LOG_PATH=/home/user/ansible-logs/ansible.log
+              ansible-playbook -i inventory.yaml crc-cloud/ansible/playbooks/start.yaml
+          else
+              echo "Could not find inventory file. Exit"
+              exit 1
+          fi
+        dest: entrypoint.sh
+
+    - name: Prepare Dockerfile
+      ansible.builtin.copy:
+        content: |
+          FROM quay.io/centos/centos:stream9
+
+          RUN dnf install -y ansible-core sudo && \
+              ansible-galaxy collection install community.general \
+                                        community.crypto ansible.posix \
+                                        kubernetes.core
+
+
+          RUN groupadd --gid 1000 user && \
+              useradd --uid 1000 --gid 1000 -d /home/user user
+          COPY entrypoint.sh /home/user/entrypoint.sh
+          RUN chown -R user:user /home/user && chmod +x /home/user/entrypoint.sh
+
+          # FIXME - change root to user
+          USER root
+
+          WORKDIR /home/user
+          ENTRYPOINT ["/home/user/entrypoint.sh"]
+
+        dest: Dockerfile
+
+    - name: Build bootstrap container
+      ansible.builtin.shell: |
+        podman build -t crc-cloud-bootstrap -f Dockerfile
+
+    - name: Create inventory file
+      ansible.builtin.copy:
+        content: |
+          ---
+          all:
+            hosts:
+              crc:
+                ansible_port: 22
+                ansible_host: {{ ansible_default_ipv4.address }}
+                ansible_user: core
+                ansible_ssh_private_key_file: /home/user/.ssh/id_ed25519
+            vars:
+              openshift_pull_secret: |
+                {{ openshift_pull_secret }}
+        dest: inventory.yaml
+
+    - name: Create Ansible log directory
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: core
+        group: core
+      loop:
+        - ansible-logs
+        - .kube
+
+    - name: Create container to boostrap
+      ansible.builtin.shell: >
+        podman create --name crc-cloud-boostrap
+        --network host
+        -v "/var/home/core/.ssh/crc-cloud-bootstrap:/home/user/.ssh/id_ed25519:z"
+        -v "/var/home/core/inventory.yaml:/home/user/inventory.yaml:z"
+        -v "/var/home/core/crc-cloud:/home/user/crc-cloud:z"
+        -v "/var/home/core/ansible-logs:/home/user/ansible-logs:z"
+        -v "/var/home/core/.kube:/home/user/.kube:z"
+        crc-cloud-bootstrap
+
+    - name: Start the container
+      ansible.builtin.shell: |
+        podman start crc-cloud-boostrap

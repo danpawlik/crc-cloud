@@ -1,0 +1,7 @@
+---
+# NOTE: The playbook by default will create nested and extracted image.
+- name: Start crc-cloud
+  gather_facts: true
+  hosts: crc
+  roles:
+    - deploy-crc-cloud
