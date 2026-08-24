@@ -20,6 +20,9 @@
   when: ca_cert_approver | bool
   ansible.builtin.include_tasks: accept_cert.yaml
 
+- name: Patch pull secret
+  ansible.builtin.include_tasks: patch_pull_secret.yaml
+
 - name: Wait for cluster become healthy
   vars:
     wait_components: "etcd|openshift-apiserver"
@@ -31,11 +34,14 @@
 - name: Replace default CA
   ansible.builtin.include_tasks: replace_default_ca.yaml
 
+- name: Wait for cluster become healthy after replacing CA and credentials
+  vars:
+    wait_components: "authentication|etcd|openshift-apiserver"
+    max_retries: 40
+  ansible.builtin.include_tasks: wait_cluster_become_healthy.yaml
+
 - name: Login to the OpenShift cluster
   ansible.builtin.include_tasks: login.yaml
-
-- name: Patch pull secret
-  ansible.builtin.include_tasks: patch_pull_secret.yaml
 
 - name: Wait for cluster become healthy after patching CA and pull secret
   vars:
